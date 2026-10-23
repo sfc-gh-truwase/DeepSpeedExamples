@@ -40,6 +40,10 @@ def _parse_args():
     parser.add_argument("--sizes-mib", type=int, nargs="+", default=[4, 64, 256])
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument("--no-touch",
+                        action="store_true",
+                        help="Do not write the host buffer before timing (pre-2026-10-23 behavior: "
+                        "untouched pageable pages read as the shared zero page).")
     parser.add_argument("--skip-native-register",
                         action="store_true",
                         help="Skip native-registered (XPU / no register_host_memory).")
@@ -59,6 +63,28 @@ def _time_copy(accelerator, copy_fn, stream, warmup, iters):
         end.record(stream)
     stream.synchronize()
     return start.elapsed_time(end) / 1000.0 / iters
+
+
+def _thp_fraction(tensor):
+    """Fraction of the VMAs backing ``tensor`` that are transparent-huge-page backed (Linux only)."""
+    begin = tensor.data_ptr()
+    end = begin + tensor.numel() * tensor.element_size()
+    span = huge = 0
+    current = None
+    try:
+        with open("/proc/self/smaps") as f:
+            for line in f:
+                head = line.split()[0]
+                if "-" in head and not head.endswith(":"):
+                    lo, hi = (int(x, 16) for x in head.split("-"))
+                    current = (lo, hi) if hi > begin and lo < end else None
+                    if current:
+                        span += hi - lo
+                elif current and head == "AnonHugePages:":
+                    huge += int(line.split()[1]) * 1024
+    except OSError:
+        return None
+    return round(huge / span, 4) if span else None
 
 
 def _allocate_host(accelerator, numel, arm):
@@ -84,6 +110,9 @@ def _run_arm(args):
         num_bytes = size_mib * 1024 * 1024
         numel = num_bytes // torch.tensor([], dtype=torch.float32).element_size()
         host = _allocate_host(accelerator, numel, args.arm)
+        if not args.no_touch:
+            host.fill_(1.0)
+        thp_before = _thp_fraction(host)
         device = torch.empty_like(host, device=accelerator.current_device_name())
 
         h2d_seconds = _time_copy(accelerator, lambda: device.copy_(host, non_blocking=True), stream, args.warmup,
@@ -99,6 +128,11 @@ def _run_arm(args):
             "d2h_gbps": num_bytes / d2h_seconds / 1e9,
             "torch_is_pinned": bool(accelerator._torch_is_pinned(host)) if args.arm != "pageable" else False,
             "accelerator_is_pinned": bool(accelerator.is_pinned(host)) if args.arm != "pageable" else False,
+            "touched": not args.no_touch,
+            "host_thp_fraction_before": thp_before,
+            "host_thp_fraction_after": _thp_fraction(host),
+            "thp_mem_alloc_enable": os.environ.get("THP_MEM_ALLOC_ENABLE"),
+            "glibc_tunables": os.environ.get("GLIBC_TUNABLES"),
         }
         print(f"RESULT={json.dumps(result, sort_keys=True)}", flush=True)
         if args.arm != "pageable":
@@ -127,6 +161,8 @@ def _run_all(args):
             "--iters",
             str(args.iters),
         ]
+        if args.no_touch:
+            command.append("--no-touch")
         process = subprocess.run(command, check=True, text=True, capture_output=True)
         if process.stderr:
             print(process.stderr, file=sys.stderr, end="")
@@ -135,10 +171,10 @@ def _run_all(args):
             if line.startswith("RESULT="):
                 results.append(json.loads(line.removeprefix("RESULT=")))
 
-    print("\narm,size_mib,h2d_gbps,d2h_gbps,torch_is_pinned,accelerator_is_pinned")
+    print("\narm,size_mib,h2d_gbps,d2h_gbps,torch_is_pinned,accelerator_is_pinned,host_thp_fraction")
     for result in results:
         print(f"{result['arm']},{result['size_mib']},{result['h2d_gbps']:.2f},{result['d2h_gbps']:.2f},"
-              f"{result['torch_is_pinned']},{result['accelerator_is_pinned']}")
+              f"{result['torch_is_pinned']},{result['accelerator_is_pinned']},{result['host_thp_fraction_before']}")
 
 
 if __name__ == "__main__":
