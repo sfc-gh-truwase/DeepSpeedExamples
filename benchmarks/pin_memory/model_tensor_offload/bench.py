@@ -22,7 +22,8 @@ if _PIN_ROOT not in sys.path:
 
 from common import (_backbone_hidden, _enable_non_reentrant_checkpointing, _install_tiled_mlp,
                     _tiled_fused_ce_loss, apply_liger, build_hf_causal_lm, dist_env, param_numel,
-                    patch_cpp_extension_drop_cxx17, print_arm_result, print_driver_result, run_arm_subprocess)
+                    StepProbe, patch_cpp_extension_drop_cxx17, print_arm_result, print_driver_result,
+                    run_arm_subprocess)
 
 
 def parse_args():
@@ -231,13 +232,19 @@ def run_arm(args):
     ids = torch.randint(0, vocab, (args.batch, args.seq), dtype=torch.long, device=dev)
 
     step_times = []
+    probe = StepProbe(f"pin{int(bool(args.pin))}")
     for step in range(args.warmup + args.steps):
         dev_api.synchronize()
         t0 = time.perf_counter()
+        probe.mark("start")
         loss = forward_loss(engine, ids)
+        probe.mark("fwd")
         engine.backward(loss)
+        probe.mark("bwd")
         engine.step()
+        probe.mark("opt")
         dev_api.synchronize()
+        probe.end_step(step, step >= args.warmup)
         if step >= args.warmup:
             step_times.append(time.perf_counter() - t0)
 

@@ -21,7 +21,8 @@ if _PIN_ROOT not in sys.path:
 
 from common import (_backbone_hidden, _enable_non_reentrant_checkpointing, _install_tiled_mlp,
                     _tiled_fused_ce_loss, apply_liger, build_hf_causal_lm, dist_env, param_numel,
-                    patch_cpp_extension_drop_cxx17, print_arm_result, print_driver_result, run_arm_subprocess)
+                    StepProbe, patch_cpp_extension_drop_cxx17, print_arm_result, print_driver_result,
+                    run_arm_subprocess)
 
 
 def parse_args():
@@ -338,6 +339,7 @@ def run_arm(args):
     last_stats = None
     step_times = []
     step_peaks = []
+    probe = StepProbe(f"pin{int(bool(args.pin))}")
     for step in range(args.warmup + args.steps):
         if step >= args.warmup:
             # Reset every measured step so the recorded peak reflects that
@@ -350,11 +352,13 @@ def run_arm(args):
         debug_mem_active[0] = debug_last_step
         accelerator.synchronize()
         t0 = time.perf_counter()
+        probe.mark("start")
         zero_grad()
         if debug_last_step:
             print(f"MEMDEBUG pre-forward {_mem_gb()}", flush=True)
         with (offload if offload is not None else contextlib.nullcontext()):
             loss = forward_loss(offload)
+            probe.mark("fwd")
             if debug_last_step:
                 accelerator.synchronize()
                 print(f"MEMDEBUG post-forward {_mem_gb()}", flush=True)
@@ -362,15 +366,18 @@ def run_arm(args):
                 engine.backward(loss)
             else:
                 loss.backward()
+        probe.mark("bwd")
         if debug_last_step:
             accelerator.synchronize()
             print(f"MEMDEBUG post-backward {_mem_gb()}", flush=True)
         optimizer_step()
+        probe.mark("opt")
         if debug_last_step:
             accelerator.synchronize()
             print(f"MEMDEBUG post-optimizer-step {_mem_gb()}", flush=True)
         debug_mem_active[0] = False
         accelerator.synchronize()
+        probe.end_step(step, step >= args.warmup)
         if step >= args.warmup:
             step_times.append(time.perf_counter() - t0)
             step_peaks.append(_peak())

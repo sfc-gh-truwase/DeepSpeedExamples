@@ -240,3 +240,70 @@ def build_hf_causal_lm(model_id, torch_dtype):
     if vocab <= 0:
         raise ValueError(f"could not determine vocab_size for {model_id}")
     return model, vocab, transformers.__version__, model_type
+
+
+class StepProbe:
+    """Per-step CPU-side fault/time probe, enabled only when PIN_BENCH_STEP_PROBE=<out_dir> is set.
+
+    mark(name) records wall time and process-wide rusage (minor faults, user/sys CPU, context switches)
+    without synchronizing, so phase marks show where faults are taken on the host. end_step() also records
+    minor faults per thread name (/proc/self/task) and host-wide /proc/vmstat fault/compaction counters,
+    and appends one JSON line per step to <out_dir>/steps_<PIN_BENCH_STEP_TAG>_<label>.jsonl.
+    """
+
+    _VMSTAT = ("pgfault", "compact_stall", "compact_fail", "thp_fault_alloc", "thp_fault_fallback",
+               "thp_collapse_alloc", "pgmajfault", "numa_hint_faults", "numa_hint_faults_local",
+               "numa_pte_updates", "numa_huge_pte_updates", "numa_pages_migrated")
+
+    def __init__(self, label):
+        out_dir = os.environ.get("PIN_BENCH_STEP_PROBE")
+        self.path = None
+        if out_dir:
+            tag = os.environ.get("PIN_BENCH_STEP_TAG", "run")
+            self.path = os.path.join(out_dir, f"steps_{tag}_{label}.jsonl")
+        self.marks = []
+
+    def _rusage(self):
+        import resource
+        import time
+        ru = resource.getrusage(resource.RUSAGE_SELF)
+        return [time.perf_counter(), ru.ru_minflt, ru.ru_utime, ru.ru_stime, ru.ru_nvcsw, ru.ru_nivcsw]
+
+    def mark(self, name):
+        if self.path:
+            self.marks.append([name, *self._rusage()])
+
+    @staticmethod
+    def _thread_faults():
+        out = {}
+        for tid in os.listdir("/proc/self/task"):
+            try:
+                stat = open(f"/proc/self/task/{tid}/stat").read()
+                comm = stat[stat.index("(") + 1:stat.rindex(")")]
+                out[comm] = out.get(comm, 0) + int(stat.rsplit(")", 1)[1].split()[7])
+            except (OSError, ValueError, IndexError):
+                continue
+        return out
+
+    def _vmstat(self):
+        vals = {}
+        try:
+            for line in open("/proc/vmstat"):
+                k, v = line.split()
+                if k in self._VMSTAT:
+                    vals[k] = int(v)
+        except OSError:
+            pass
+        return vals
+
+    def end_step(self, step, measured):
+        if not self.path:
+            return
+        self.mark("end")
+        rec = {"step": step, "measured": measured, "pid": os.getpid(),
+               "marks": [[m[0], round(m[1], 6), *m[2:3], round(m[3], 4), round(m[4], 4), m[5], m[6]]
+                         for m in self.marks],
+               "thread_minflt": self._thread_faults(), "vmstat": self._vmstat()}
+        with open(self.path, "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        self.marks = []
