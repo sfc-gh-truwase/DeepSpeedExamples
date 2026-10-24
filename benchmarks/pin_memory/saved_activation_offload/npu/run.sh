@@ -34,7 +34,18 @@ fi
 mkdir -p results
 TS="$(date +%F_%H%M%S)"
 
-python ../bench.py --model "$MODEL" --batch 1 --seq 2048 \
+# Opt out of automatic NUMA balancing (kernel.numa_balancing=1): its hinting
+# faults and page migrations hit every large host buffer (CPU Adam state, pinned
+# and pageable offload buffers) each step and add per-step jitter. An explicit
+# bind policy over all nodes disables it for this process tree without limiting
+# placement. Set NUMA_BIND=0 to measure with balancing on. See ../../README.md.
+LAUNCH=()
+if [ "${NUMA_BIND:-1}" = 1 ] && command -v numactl >/dev/null 2>&1 \
+        && [ "$(cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo 0)" != 0 ]; then
+    LAUNCH=(numactl --membind=all)
+fi
+
+${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq 2048 \
     --offload-tensors 3 --offload-optimizer --act-mem-opt \
     --steps 20 --warmup 5 --credits 1 \
     --manifest-out results/qwen3-4b-seq2048-k3-manifest.json \

@@ -6,6 +6,25 @@ one experiment. Shared subprocess/JSON helpers live in `common.py`.
 Native backends `mlock` host memory: raise `RLIMIT_MEMLOCK` (`ulimit -l`) or
 run as root for multi-GB models.
 
+## NUMA balancing
+
+On multi-socket hosts with `kernel.numa_balancing=1` (H200 nodes: 2 nodes, 192 CPUs), the
+kernel periodically unmaps the pages of large, long-lived host buffers to sample access, and
+migrates them. On 4 KiB pages this costs 1.6–6.8M minor faults per step (exactly
+`numa_hint_faults` + `numa_pages_migrated`), in **both** arms. They land in backward and the
+CPU Adam step, along with 10–70 CPU-s of sys time, and make step times noisy. The cuda/npu
+`run.sh` scripts therefore launch under `numactl --membind=all`. That sets an explicit bind policy
+over all nodes, which NUMA balancing skips, and leaves placement unrestricted. When calling
+`bench.py` directly, do the same:
+
+```bash
+numactl --membind=all python model_tensor_offload/bench.py --model Qwen/Qwen3-8B --zero-stage 3
+```
+
+Arm subprocesses inherit the policy (check: `/proc/<pid>/numa_maps` shows `bind:0-1`).
+`NUMA_BIND=0 ./run.sh` measures with balancing on. Set `PIN_BENCH_STEP_PROBE=<dir>` to log
+per-step/per-phase faults, CPU time and NUMA counters (`StepProbe` in `common.py`).
+
 ## Layout
 
 | Folder | Blog experiment | Default command |
