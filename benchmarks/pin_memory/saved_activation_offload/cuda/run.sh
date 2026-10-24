@@ -32,16 +32,30 @@ fi
 mkdir -p results
 TS="$(date +%F_%H%M%S)"
 
-# Opt out of automatic NUMA balancing (kernel.numa_balancing=1): its hinting
-# faults and page migrations hit every large host buffer (CPU Adam state, pinned
-# and pageable offload buffers) each step and add per-step jitter. An explicit
-# bind policy over all nodes disables it for this process tree without limiting
-# placement. Set NUMA_BIND=0 to measure with balancing on. See ../../README.md.
+# --- NUMA launch ---
+# Place host memory on the GPU's NUMA node and keep CPU threads there. On H200,
+# remote host memory cost +1.1-1.5 s/step (CPU Adam). An explicit policy also opts
+# the process out of automatic NUMA balancing (kernel.numa_balancing=1), whose
+# hinting faults hit every large host buffer each step. --preferred spills to other
+# nodes instead of failing if one node is too small. If the node is unknown, fall
+# back to --membind=all (balancing off, placement unrestricted). NUMA_NODE=<n>
+# overrides detection; NUMA_BIND=0 disables. See ../../README.md.
 LAUNCH=()
-if [ "${NUMA_BIND:-1}" = 1 ] && command -v numactl >/dev/null 2>&1 \
-        && [ "$(cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo 0)" != 0 ]; then
-    LAUNCH=(numactl --membind=all)
+if [ "${NUMA_BIND:-1}" = 1 ] && command -v numactl >/dev/null 2>&1; then
+    NODE="${NUMA_NODE:-}"
+    if [ -z "$NODE" ] && command -v nvidia-smi >/dev/null 2>&1; then
+        BDF="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i "${CUDA_VISIBLE_DEVICES%%,*}" 2>/dev/null \
+            | tr 'A-F' 'a-f')"
+        NODE="$(cat "/sys/bus/pci/devices/${BDF: -12}/numa_node" 2>/dev/null || echo -1)"
+    fi
+    if [ -n "$NODE" ] && [ "$NODE" -ge 0 ] 2>/dev/null; then
+        LAUNCH=(numactl --cpunodebind="$NODE" --preferred="$NODE")
+    elif [ "$(cat /proc/sys/kernel/numa_balancing 2>/dev/null || echo 0)" != 0 ]; then
+        LAUNCH=(numactl --membind=all)
+    fi
 fi
+echo "launch: ${LAUNCH[*]:-(none)}"
+# --- end NUMA launch ---
 
 ${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq 4096 \
     --offload-optimizer \

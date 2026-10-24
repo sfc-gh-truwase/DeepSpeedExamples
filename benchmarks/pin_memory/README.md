@@ -12,17 +12,22 @@ On multi-socket hosts with `kernel.numa_balancing=1` (H200 nodes: 2 nodes, 192 C
 kernel periodically unmaps the pages of large, long-lived host buffers to sample access, and
 migrates them. On 4 KiB pages this costs 1.6–6.8M minor faults per step (exactly
 `numa_hint_faults` + `numa_pages_migrated`), in **both** arms. They land in backward and the
-CPU Adam step, along with 10–70 CPU-s of sys time, and make step times noisy. The cuda/npu
-`run.sh` scripts therefore launch under `numactl --membind=all`. That sets an explicit bind policy
-over all nodes, which NUMA balancing skips, and leaves placement unrestricted. When calling
-`bench.py` directly, do the same:
+CPU Adam step, along with 10–70 CPU-s of sys time, and make step times noisy. Host memory **placement** matters too:
+on H200, host memory on the node remote from the GPU cost +1.1-1.5 s/step, mostly in the CPU Adam
+step. Pinned DMA bandwidth is the same either way; pageable H2D drops 27%. So the cuda `run.sh`
+scripts launch under `numactl --cpunodebind=<gpu node> --preferred=<gpu node>`, with the node read from
+sysfs for the first visible GPU. The npu scripts need `NUMA_NODE=<n>`. Without a known node, they
+fall back to `numactl --membind=all`, which disables balancing but leaves placement unrestricted.
+Either explicit policy opts the process out of NUMA balancing. When calling `bench.py` directly:
 
 ```bash
-numactl --membind=all python model_tensor_offload/bench.py --model Qwen/Qwen3-8B --zero-stage 3
+N=$(cat /sys/bus/pci/devices/<gpu BDF>/numa_node)
+numactl --cpunodebind=$N --preferred=$N python model_tensor_offload/bench.py --model Qwen/Qwen3-8B --zero-stage 3
 ```
 
-Arm subprocesses inherit the policy (check: `/proc/<pid>/numa_maps` shows `bind:0-1`).
-`NUMA_BIND=0 ./run.sh` measures with balancing on. Set `PIN_BENCH_STEP_PROBE=<dir>` to log
+For multi-rank runs, bind each rank to its own device's node, never all ranks to one node.
+Arm subprocesses inherit the policy (check: `/proc/<pid>/numa_maps` shows `prefer:<n>` or `bind:`).
+`NUMA_BIND=0 ./run.sh` measures with no explicit policy (balancing on, if enabled). Set `PIN_BENCH_STEP_PROBE=<dir>` to log
 per-step/per-phase faults, CPU time and NUMA counters (`StepProbe` in `common.py`).
 
 ## Layout
