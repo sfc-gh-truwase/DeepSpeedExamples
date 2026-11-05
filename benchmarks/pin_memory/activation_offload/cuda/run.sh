@@ -1,12 +1,14 @@
 #!/bin/bash
 # Activation checkpoint offload (recipe C) — H200 one-click run
-# Parameters pinned for this card (~139.8 GiB usable):
-#   Qwen3-8B / batch 1 x seq 32768 / ZeRO-2 CPU AdamW / Liger fused linear CE
+# Parameters of the published blog row (~139.8 GiB usable):
+#   Qwen3-8B / batch 1 x seq 65536 / ZeRO-2 CPU AdamW / Liger fused linear CE
 #   + TiledMLP / activation offload (CheckpointHiddenStatesOffload)
 #   / --steps 10 --warmup 1
 # Usage:
 #   ./run.sh                          # model from the HF hub (config only, random weights)
 #   MODEL=/path/to/Qwen3-8B ./run.sh  # local config
+#   MODEL=Qwen/Qwen3.5-9B ./run.sh    # Qwen3.5 row (needs fla + causal-conv1d)
+#   SEQ=8192 ./run.sh                 # shorter sequence
 # Results and logs go to ./results/.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -59,7 +61,9 @@ fi
 echo "launch: ${LAUNCH[*]:-(none)}"
 # --- end NUMA launch ---
 
-${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq 32768 \
+SEQ="${SEQ:-65536}"
+
+${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq "$SEQ" \
     --offload-optimizer --act-mem-opt \
     --steps 10 --warmup 1 \
     2>&1 | tee "results/activation_offload_${TS}.log"

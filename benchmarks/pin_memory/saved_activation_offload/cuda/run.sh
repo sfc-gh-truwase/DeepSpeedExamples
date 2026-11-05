@@ -1,10 +1,14 @@
 #!/bin/bash
 # Saved-activation offload — H200 one-click run
-# Parameters pinned for this card (~139.8 GiB usable):
-#   Qwen3-8B / batch 1 x seq 4096 / ZeRO-2 CPU AdamW optimizer offload
+# Parameters of the published blog row (~139.8 GiB usable):
+#   Qwen3-8B / batch 1 x seq 65536 / whole-decoder-layer scope / --offload-tensors -1
+#   / --credits 1 --prefetch 2 / ZeRO-2 CPU AdamW / --act-mem-opt / --steps 10 --warmup 1
+#   seq >= 32768 uses extrapolated discovery (--discover-calib-seqs 4096 8192).
 # Usage:
-#   ./run.sh                          # model from the HF hub
-#   MODEL=/path/to/Qwen3-8B ./run.sh  # local checkpoint
+#   ./run.sh                              # model from the HF hub
+#   MODEL=/path/to/Qwen3-8B ./run.sh      # local checkpoint
+#   MODEL=Qwen/Qwen3.5-9B ./run.sh        # Qwen3.5 row (needs fla + causal-conv1d)
+#   SEQ=8192 ./run.sh                     # shorter sequence
 # Results and logs go to ./results/.
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -57,7 +61,14 @@ fi
 echo "launch: ${LAUNCH[*]:-(none)}"
 # --- end NUMA launch ---
 
-${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq 4096 \
-    --offload-optimizer \
-    --manifest-out "results/qwen3-8b-seq4096-manifest.json" \
-    2>&1 | tee "results/saved_activation_${TS}.log"
+SEQ="${SEQ:-65536}"
+CALIB=()
+[ "$SEQ" -ge 32768 ] && CALIB=(--discover-calib-seqs 4096 8192)
+TAG="$(basename "$MODEL" | tr 'A-Z' 'a-z')-seq${SEQ}"
+
+${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq "$SEQ" \
+    --offload-optimizer --act-mem-opt \
+    --offload-tensors -1 --credits 1 --prefetch 2 \
+    --steps 10 --warmup 1 \
+    --manifest-out "results/${TAG}-manifest.json" ${CALIB[@]+"${CALIB[@]}"} \
+    2>&1 | tee "results/saved_activation_${TAG}_${TS}.log"

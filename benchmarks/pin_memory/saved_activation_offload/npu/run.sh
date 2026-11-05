@@ -1,7 +1,9 @@
 #!/bin/bash
 # Saved-activation offload — Ascend 910B4 one-click run
-# Parameters pinned for this card (29.5 GiB usable):
-#   Qwen3-4B / batch 1 x seq 2048 / K=3 / --credits 1 / ZeRO-2 CPU AdamW
+# Parameters of the published blog row (29.5 GiB usable), same flags as H200:
+#   Qwen3-4B / batch 1 x seq 2048 / --offload-tensors -1 / --credits 1 --prefetch 2
+#   / ZeRO-2 CPU AdamW / --act-mem-opt. Set NUMA_NODE=<NPU node> for the bound row.
+#   (The earlier unbound 1.14x row used K=3; re-run with these flags.)
 # Usage:
 #   ./run.sh                          # model from the HF hub
 #   MODEL=/path/to/Qwen3-4B ./run.sh  # local checkpoint
@@ -56,7 +58,7 @@ echo "launch: ${LAUNCH[*]:-(none)}"
 # --- end NUMA launch ---
 
 ${LAUNCH[@]+"${LAUNCH[@]}"} python ../bench.py --model "$MODEL" --batch 1 --seq 2048 \
-    --offload-tensors 3 --offload-optimizer --act-mem-opt \
-    --steps 20 --warmup 5 --credits 1 \
-    --manifest-out results/qwen3-4b-seq2048-k3-manifest.json \
+    --offload-tensors -1 --offload-optimizer --act-mem-opt \
+    --steps 20 --warmup 5 --credits 1 --prefetch 2 \
+    --manifest-out results/qwen3-4b-seq2048-manifest.json \
     2>&1 | tee "results/saved_activation_${TS}.log"

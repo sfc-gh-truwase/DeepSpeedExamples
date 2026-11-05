@@ -3,9 +3,10 @@
 
 # Credit-bounded saved-activation offload
 
-This benchmark compares pageable and CUDA-native pinned host buffers for saved
-MLP intermediates. It is an experiment harness, not a DeepSpeed configuration
-or production API.
+This benchmark compares pageable and natively pinned, device-registered host
+buffers for the tensors autograd saves inside each decoder layer (the default
+`--offload-modules` scope, `layers.N`; earlier runs used an MLP-only scope). It is
+an experiment harness, not a DeepSpeed configuration or production API.
 
 The driver first performs a discovery subprocess and freezes the selected
 saved-tensor manifest. Every timed subprocess repeats discovery only to reject
@@ -29,8 +30,9 @@ The scheduler smoke is CPU-safe:
 python benchmarks/pin_memory/saved_activation_offload/bench.py --smoke
 ```
 
-The benchmark itself is CUDA-only. Synthetic runs are for correctness and
-credit-pressure validation:
+The benchmark itself needs an accelerator (CUDA, or Ascend NPU through DeepSpeed's
+accelerator abstraction). Synthetic runs are for correctness and credit-pressure
+validation:
 
 ```bash
 ulimit -l unlimited
@@ -41,16 +43,20 @@ python benchmarks/pin_memory/saved_activation_offload/bench.py \
   --hidden 1024 --layers 8 --batch 1 --seq 2048 --n-sweep
 ```
 
-Published model runs use Qwen3 with checkpointing disabled:
+Published model runs use Qwen3 with checkpointing disabled, at the settings
+below (H200 blog row, seq 65536):
 
 ```bash
 python benchmarks/pin_memory/saved_activation_offload/bench.py \
-  --model Qwen/Qwen3-8B --batch 1 --seq 4096 --offload-optimizer \
-  --manifest-out qwen3-8b-saved-activation-manifest.json
+  --model Qwen/Qwen3-8B --batch 1 --seq 65536 --offload-optimizer --act-mem-opt \
+  --offload-tensors -1 --credits 1 --prefetch 2 --steps 10 --warmup 1 \
+  --discover-calib-seqs 4096 8192 \
+  --manifest-out qwen3-8b-seq65536-manifest.json
 ```
 
-Defaults are `N=2`, `M=1`, `K=3`, one skipped final layer, 5 warmup steps,
-and 20 measured steps. The normal driver runs fresh subprocesses in A/B/B/A
+Bench defaults are `N=2`, `M=1`, `K=3`, one skipped final layer, 5 warmup steps,
+and 20 measured steps. They differ from the published settings (`N=1`, `M=2`,
+`K=-1`), so pass those explicitly. The normal driver runs fresh subprocesses in A/B/B/A
 order. `--n-sweep` runs `N={1,2,4}` with the same manifest. `ARMRESULT` and
 `DRIVERRESULT` lines use the shared pin-memory benchmark JSON helpers.
 
@@ -92,11 +98,12 @@ what a practitioner enabling checkpoint offload today would get.
 
 ## Current limits
 
-Only single-GPU CUDA, dense non-overlapping offset-zero views, and one matched
-MLP per decoder layer are supported. A storage saved through multiple different
-shape/stride signatures is left resident; one dense slot cannot restore those
-aliases safely. XPU, B70, MoE, Qwen3.5, distributed training, ZeRO-3,
-compilation, and repeated backward are out of scope.
+Only a single device (CUDA GPU or Ascend NPU), dense non-overlapping offset-zero
+views, and one matched module per decoder layer are supported. A storage saved
+through multiple different shape/stride signatures is left resident; one dense
+slot cannot restore those aliases safely. Qwen3 and Qwen3.5 (hybrid) are measured.
+Intel XPU (Arc Pro B60) is required for the blog but not yet run. MoE, distributed
+training, ZeRO-3, compilation, and repeated backward are out of scope.
 
 The JSON reports copy-stream event time and effective D2H/H2D bandwidth, step
 percentiles, host enqueue time, selected and allocated host bytes,
@@ -184,20 +191,25 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 ulimit -l unlimited   # native pin mlocks host memory
 ```
 
-One-click run — `cuda/run.sh` pins the H200 experiment parameters (Qwen3-8B,
-batch 1 × seq 4096, ZeRO-2 CPU AdamW optimizer offload):
+One-click run — `cuda/run.sh` runs the published H200 row (Qwen3-8B, batch 1 ×
+seq 65536, `--offload-tensors -1 --credits 1 --prefetch 2`, ZeRO-2 CPU AdamW,
+`--act-mem-opt`, 10 steps / 1 warmup), bound to the GPU's NUMA node. Seq 32768 and
+above add `--discover-calib-seqs 4096 8192`:
 
 ```bash
-cd cuda && ./run.sh                      # model from the HF hub
+cd cuda && ./run.sh                           # model from the HF hub
 cd cuda && MODEL=/path/to/Qwen3-8B ./run.sh   # local checkpoint
+cd cuda && MODEL=Qwen/Qwen3.5-9B ./run.sh     # Qwen3.5 row
+cd cuda && SEQ=8192 ./run.sh                  # shorter sequence
 ```
 
 Manual equivalent of the pinned parameters:
 
 ```bash
 python benchmarks/pin_memory/saved_activation_offload/bench.py \
-    --model Qwen/Qwen3-8B --batch 1 --seq 4096 --offload-optimizer \
-    --manifest-out qwen3-8b-seq4096-manifest.json
+    --model Qwen/Qwen3-8B --batch 1 --seq 65536 --offload-optimizer --act-mem-opt \
+    --offload-tensors -1 --credits 1 --prefetch 2 --steps 10 --warmup 1 \
+    --discover-calib-seqs 4096 8192 --manifest-out qwen3-8b-seq65536-manifest.json
 ```
 
 ## Environment setup (Ascend 910B4, CANN 8.5.1 + torch 2.10)
@@ -209,21 +221,22 @@ export ASCEND_RT_VISIBLE_DEVICES=0
 ulimit -l unlimited
 ```
 
-One-click run — `npu/run.sh` pins the NPU experiment parameters (Qwen3-4B,
-batch 1 × seq 2048, K=3, `--credits 1`, ZeRO-2 CPU AdamW):
+One-click run — `npu/run.sh` runs the NPU row with the same flags as H200 (Qwen3-4B,
+batch 1 × seq 2048, `--offload-tensors -1 --credits 1 --prefetch 2`, ZeRO-2 CPU AdamW).
+Set `NUMA_NODE=<NPU node>` for the bound row. The earlier unbound 1.14× row used `K=3`.
 
 ```bash
-cd npu && ./run.sh                      # model from the HF hub
-cd npu && MODEL=/path/to/Qwen3-4B ./run.sh   # local checkpoint
+cd npu && NUMA_NODE=<n> ./run.sh                      # model from the HF hub
+cd npu && NUMA_NODE=<n> MODEL=/path/to/Qwen3-4B ./run.sh   # local checkpoint
 ```
 
 Manual equivalent of the pinned parameters:
 
 ```bash
 python bench.py --model Qwen/Qwen3-4B --batch 1 --seq 2048 \
-    --offload-tensors 3 --offload-optimizer --act-mem-opt \
-    --steps 20 --warmup 5 --credits 1 \
-    --manifest-out qwen3-4b-seq2048-k3-manifest.json
+    --offload-tensors -1 --offload-optimizer --act-mem-opt \
+    --steps 20 --warmup 5 --credits 1 --prefetch 2 \
+    --manifest-out qwen3-4b-seq2048-manifest.json
 ```
 
 Notes:

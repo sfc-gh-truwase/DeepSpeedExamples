@@ -16,7 +16,10 @@ and the launch policy for each row.
 ## Open
 
 - [ ] **Ascend 910B4, bound re-run.** Model-tensor (Qwen3-4B, seq 1024 and 2048), activation checkpoint
-  (Qwen3-4B, seq 8192), saved-activation (Qwen3-4B, seq 2048). Current figures are unbound.
+  (Qwen3-4B, seq 8192), saved-activation (Qwen3-4B, seq 2048, now with the H200 flags in `npu/run.sh`:
+  `--offload-tensors -1 --credits 1 --prefetch 2`; the unbound 1.14× row used K=3). Current figures are
+  unbound. Record `kernel.numa_balancing`, `ulimit -l`, the NUMA node, and the pin backend
+  (activation `npu/run.sh` uses `DS_PIN_MEMORY_BACKEND=torch`).
 - [ ] **Ascend 910B4, H2D/D2H touched-buffer check.** Re-run native-registered vs pageable at 256 MiB with
   the buffer written and with `--no-touch`, at 4K and 2M. The 6.4 → 23 GB/s page-size claim is unverified.
 - [ ] **Arc Pro B60, model-tensor** (Qwen3-0.6B, or 1.7B if host RAM allows). Not collected.
@@ -24,10 +27,15 @@ and the launch policy for each row.
   limitation if the engine fails on stock PyTorch XPU.
 - [ ] **Arc Pro B60, saved-activation** (Qwen3 0.6B/1.7B, batch 1, seq 2048). Required, not collected.
 - [ ] **Arc Pro B60, H2D/D2H microbench** (`--skip-native-register`). Not collected.
-- [ ] **H200, Qwen3.5-9B bound re-run** of model-tensor and saved-activation (current figures unbound).
-- [ ] **Ascend 910B4, Qwen3.5 bound re-run** of model-tensor (current figures unbound). Qwen3.5 on B60 comes
-  with the B60 rows above.
-- [ ] **Blog README draft** (`blogs/pinned-offload/08-2026/README.md`) after the rows above are in.
+- [ ] **H200, Qwen3.5-9B bound re-run** of model-tensor (seq 4096), activation checkpoint (seq 65536), and
+  saved-activation (seq 65536; record the pageable step time, which the unbound job did not). Current figures
+  are unbound. `MODEL=Qwen/Qwen3.5-9B ./run.sh` in each `cuda/` directory.
+- [ ] **Ascend 910B4, Qwen3.5 bound re-run** of model-tensor (seq 512 and 1024) and activation checkpoint
+  (seq 8192), plus saved-activation (seq 2048, not yet collected). First confirm `flash-linear-attention` and
+  `causal-conv1d` kernels are active: the unbound activation checkpoint step (92.6 s) is ~6× Qwen3-4B's.
+  Qwen3.5 on B60 comes with the B60 rows above.
+- [x] **Blog README draft** (`blogs/pinned-offload/08-2026/README.md`, 2026-11-05). B60 and bound Ascend
+  rows are placeholders until the rows above land.
 
 ## Hardware access needed
 

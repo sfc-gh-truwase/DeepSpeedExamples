@@ -6,12 +6,15 @@ offloads the optimizer only.
 
 See the [parent README](../README.md).
 
-H200 (ZeRO-3 param+optim, pin on/off):
+H200 (ZeRO-3 param+optim, pin on/off; the published blog rows):
 
 ```bash
 ulimit -l unlimited
-python bench.py --model Qwen/Qwen3-8B --batch 4 --seq 512
-python bench.py --model Qwen/Qwen3.5-9B --batch 4 --seq 512
+python bench.py --model Qwen/Qwen3-8B --batch 1 --seq 4096 --steps 10
+python bench.py --model Qwen/Qwen3.5-9B --batch 1 --seq 4096 --steps 10
 ```
+
+Ascend 910B4 rows use `Qwen/Qwen3-4B` at seq 1024 and 2048 (and `Qwen/Qwen3.5-4B` at 512 and 1024).
+Launch under the NUMA binding described in the [parent README](../README.md).
 
 Use `Qwen/Qwen3-4B` if host RAM is under ~256 GB. Qwen3.5 is instantiated from the text config when the hub card is multimodal. MoE/FP8 ids are rejected.

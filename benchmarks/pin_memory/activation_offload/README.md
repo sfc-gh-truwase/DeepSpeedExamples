@@ -27,7 +27,12 @@ python bench.py --model Qwen/Qwen3.5-9B --batch 1 --seq 32768 --offload-optimize
 
 HF path defaults to Liger (RoPE, RMSNorm, SwiGLU, fused linear CE) plus DeepSpeed
 TiledMLP. If Liger fused CE is missing, DeepSpeed ``TiledFusedLogitsLoss`` is used.
-Disable with ``--no-act-mem-opt``.
+Qwen3.5 gets Liger fused linear CE from liger-kernel 0.8.4; it also needs
+``flash-linear-attention`` and ``causal-conv1d``, or its linear-attention layers fall
+back to a much slower pure-PyTorch path. Disable with ``--no-act-mem-opt``.
+
+The pinned arm uses ``DS_PIN_MEMORY_BACKEND=native`` with device registration unless the
+caller sets the backend (``npu/run.sh`` selects ``torch``).
 
 ## Environment setup (H200, CUDA)
 
@@ -36,20 +41,22 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 ulimit -l unlimited
 ```
 
-One-click run — `cuda/run.sh` pins the H200 experiment parameters (Qwen3-8B,
-batch 1 × seq 32768, ZeRO-2 CPU AdamW, Liger fused linear CE + TiledMLP,
-10 steps / 1 warmup):
+One-click run — `cuda/run.sh` runs the published H200 row (Qwen3-8B,
+batch 1 × seq 65536, ZeRO-2 CPU AdamW, Liger fused linear CE + TiledMLP,
+10 steps / 1 warmup), bound to the GPU's NUMA node:
 
 ```bash
-cd cuda && ./run.sh                      # model from the HF hub
+cd cuda && ./run.sh                           # model from the HF hub
 cd cuda && MODEL=/path/to/Qwen3-8B ./run.sh   # local checkpoint
+cd cuda && MODEL=Qwen/Qwen3.5-9B ./run.sh     # Qwen3.5 row
+cd cuda && SEQ=8192 ./run.sh                  # shorter sequence
 ```
 
 Manual equivalent of the pinned parameters:
 
 ```bash
 python bench.py --model Qwen/Qwen3-8B --batch 1 \
-    --seq 32768 --offload-optimizer --act-mem-opt --steps 10 --warmup 1
+    --seq 65536 --offload-optimizer --act-mem-opt --steps 10 --warmup 1
 ```
 
 ## Environment setup (Ascend 910B4, CANN 8.5.1 + torch 2.10)
