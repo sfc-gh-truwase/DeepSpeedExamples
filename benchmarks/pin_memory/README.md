@@ -38,9 +38,6 @@ per-step/per-phase faults, CPU time and NUMA counters (`StepProbe` in `common.py
 | [`activation_offload/`](activation_offload/) | Checkpoint hidden-state offload; `use_pin_memory` on/off, **async on** | `python activation_offload/bench.py --hidden 1024 --layers 8 --batch 1 --seq 2048` |
 | [`saved_activation_offload/`](saved_activation_offload/) | Credit-bounded saved MLP activation offload (no remat) | `python saved_activation_offload/bench.py --model Qwen/Qwen3-8B --offload-optimizer` |
 | [`h2d_d2h/`](h2d_d2h/) | Supporting H2D/D2H GB/s (pageable, torch, native-unregistered, native-registered) | `python h2d_d2h/bench.py` |
-| [`grad_offload/`](grad_offload/) | Optional #8207-style grad offload (wraps model-tensor ZeRO-3) | `python grad_offload/bench.py --hidden 2048 --layers 12` |
-| [`cpu_pin/`](cpu_pin/) | Optional CPU-only native vs Torch pin | `python cpu_pin/bench.py` |
-| [`deepcompile_activation/`](deepcompile_activation/) | Optional `compile.offload_activation_pin_memory` | `python deepcompile_activation/bench.py` |
 
 `zero3_offload_bench.py` at this directory root still runs **model-tensor ZeRO-3** (same flags as before).
 
