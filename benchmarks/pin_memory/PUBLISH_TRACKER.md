@@ -17,8 +17,6 @@ and the launch policy for each row.
 
 ## Open
 
-- [ ] **H200, Qwen3.5-9B saved-activation repeats** at 8K, 16K and 64K: bound runs show ~4 s arm spread
-  (Qwen3-8B bound <=0.4 s). Two reps each queued as `20261105T165925Z`.
 - [ ] **Ascend 910B4, bound re-run.** Model-tensor (Qwen3-4B, seq 1024 and 2048), activation checkpoint
   (Qwen3-4B, seq 8192), saved-activation (Qwen3-4B, seq 2048, now with the H200 flags in `npu/run.sh`:
   `--offload-tensors -1 --credits 1 --prefetch 2`; the unbound 1.14× row used K=3). Current figures are
