@@ -12,8 +12,7 @@ and the launch policy for each row.
 - [x] Saved-activation, Qwen3-8B, seq 8192 / 16384 / 32768 / 65536 (`20261026T133233Z`, `20261024T171244Z`)
 - [x] H2D/D2H microbench, 256 MiB and 1 GiB (`20261027T132751Z`)
 - [x] 4K vs 2M page size, all H200 workloads (`20261027T132751Z`)
-- [x] Qwen3.5-9B model-tensor (seq 4096) and saved-activation (seq 2K-64K), bound (`20261105T120256Z`, 16K from
-  `20261105T162755Z`; Qwen3.5 needs `--discover-calib-seqs 4096 8192` from seq 16384)
+- [x] Qwen3.5-9B model-tensor (seq 4096) and saved-activation (seq 2K-64K), bound and unbound (`20261107T043012Z` model-tensor; `20261107T202125Z` saved-activation; Qwen3.5 needs `--discover-calib-seqs 4096 8192` from seq 16384)
 
 ## Open
 

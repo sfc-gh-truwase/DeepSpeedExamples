@@ -225,13 +225,26 @@ def build_hf_causal_lm(model_id, torch_dtype):
         except TypeError:
             return AutoModelForCausalLM.from_config(text_config, torch_dtype=torch_dtype, **extra)
 
-    # Pin/offload wall time does not need pretrained-style init values.
+    # Weights are filled below; no_init_weights only skips HF init.
     with no_init_weights():
         try:
             model = from_config(attn_implementation="flash_attention_2")
         except Exception as exc:
             print(f"flash_attention_2 unavailable ({type(exc).__name__}: {exc}); default attn", flush=True)
             model = from_config()
+
+    # no_init_weights leaves parameters as uninitialized memory, so the forward
+    # pass reads whatever bytes the allocator returned; some runs then produce
+    # NaN/Inf. Fill them with a fixed seed. fork_rng keeps the caller's RNG state.
+    import torch
+    with torch.random.fork_rng(devices=[]):
+        torch.manual_seed(0)
+        with torch.no_grad():
+            for param in model.parameters():
+                if param.dim() >= 2:
+                    param.normal_(0.0, 0.02)
+                else:
+                    param.fill_(1.0)
 
     vocab = int(getattr(text_config, "vocab_size", 0) or getattr(config, "vocab_size", 0) or 0)
     if vocab <= 0:
