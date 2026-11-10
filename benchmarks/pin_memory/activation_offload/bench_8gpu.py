@@ -69,11 +69,13 @@ def parse_args():
                    "(DeepSpeedCPUAdam)")
     p.add_argument("--nproc", type=int, default=1, help="GPUs per node (1 = single process; >1 uses torchrun)")
     p.add_argument("--numa_bind",
-                   choices=("none", "node", "torchrun_node"),
+                   choices=("none", "node", "torchrun_node", "ds_bind_cores"),
                    default="none",
                    help="node: run each torchrun rank under numactl --cpunodebind=N --preferred=N, N = its GPU's "
                    "NUMA node (also opts the rank out of automatic NUMA balancing). Fails if N is unknown. "
-                   "torchrun_node: torchrun --numa-binding=node (CPU affinity only, no memory policy).")
+                   "torchrun_node: torchrun --numa-binding=node (CPU affinity only, no memory policy). "
+                   "ds_bind_cores: launch with deepspeed --bind_cores_to_rank instead of torchrun "
+                   "(numactl -m <node> -C <cores split by rank order>; single node only).")
     p.add_argument("--nnodes", type=int, default=1, help="torchrun nnodes (1 = standalone; >1 needs --hostfile)")
     p.add_argument("--hostfile", default="", help="DeepSpeed-style hostfile; required when --nnodes>1")
     p.add_argument("--master_addr", default="", help="Rendezvous IP; default is the first hostfile entry")
@@ -1694,6 +1696,13 @@ def run_driver(args):
                     cmd = cmd + ["bash", "-c", _NUMA_WRAP, "numa_wrap", sys.executable] + child
                 else:
                     cmd = cmd + child
+                if args.numa_bind == "ds_bind_cores":
+                    if nnodes > 1:
+                        raise ValueError("--numa_bind ds_bind_cores supports a single node only")
+                    cmd = [
+                        sys.executable, "-m", "deepspeed.launcher.runner", f"--num_gpus={nproc}",
+                        f"--master_port={port}", "--bind_cores_to_rank", "--no_local_rank"
+                    ] + child
             else:
                 cmd = [sys.executable] + child
                 hosts = []
