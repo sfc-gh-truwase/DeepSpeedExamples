@@ -946,7 +946,7 @@ def run_child(args):
     except OSError:
         pass
     print(f"[affinity] local_rank={local_rank} cpus={placement.get('Cpus_allowed_list')} "
-          f"mems={placement.get('Mems_allowed_list')}",
+          f"mems={placement.get('Mems_allowed_list')} omp={os.environ.get('OMP_NUM_THREADS')}",
           file=sys.stderr,
           flush=True)
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
