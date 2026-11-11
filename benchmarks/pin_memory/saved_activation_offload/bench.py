@@ -73,6 +73,17 @@ def parse_args():
                         help="ZeRO-2 CPU AdamW offload (params stay on GPU). HF --model only. Matches "
                              "activation_offload/bench.py's optimizer-offload axis; does not change this "
                              "benchmark's own credit-bounded MLP-tensor offload.")
+    parser.add_argument("--zero2-gpu",
+                        action="store_true",
+                        help="ZeRO-2 with AdamW on the GPU (bf16, fp32 master weights and optimizer state, no CPU "
+                        "offload). HF --model only. Launch under torchrun to shard the state across ranks.")
+    parser.add_argument("--prepare-seqs",
+                        type=int,
+                        nargs="+",
+                        default=None,
+                        help="Run the two --discover-calib-seqs discoveries once and write one extrapolated "
+                        "manifest per listed seqlen to --manifest-out (which must contain {seq}), then exit. "
+                        "Prepares manifests for torchrun arms, which never run discovery themselves.")
     parser.add_argument("--mode", choices=("offload", "none", "remat"), default="offload")
     parser.add_argument("--manifest-out", default=None)
     parser.add_argument("--discover-calib-seqs", type=int, nargs=2, default=None, metavar=("LO", "HI"),
@@ -139,7 +150,8 @@ def _build_recipe(args, device):
 
         return model, forward_loss, None, None, None, None
 
-    if args.offload_optimizer:
+    use_zero = args.offload_optimizer or args.zero2_gpu
+    if use_zero and "WORLD_SIZE" not in os.environ:
         dist_env()
     if args.act_mem_opt:
         try:
@@ -148,18 +160,17 @@ def _build_recipe(args, device):
             print(f"liger unavailable ({type(exc).__name__}: {exc})", flush=True)
     model, vocab, transformers_version, model_type = build_hf_causal_lm(args.model, torch.bfloat16)
     ds_engine = None
-    if args.offload_optimizer:
+    if use_zero:
         import deepspeed
         ds_config = {
             "train_micro_batch_size_per_gpu": args.batch,
             "gradient_accumulation_steps": 1,
             "bf16": {"enabled": True},
             "optimizer": {"type": "AdamW", "params": {"lr": 1e-4}},
-            "zero_optimization": {
-                "stage": 2,
-                "offload_optimizer": {"device": "cpu", "pin_memory": bool(args.pin)},
-            },
+            "zero_optimization": {"stage": 2},
         }
+        if args.offload_optimizer:
+            ds_config["zero_optimization"]["offload_optimizer"] = {"device": "cpu", "pin_memory": bool(args.pin)}
         ds_engine, _, _, _ = deepspeed.initialize(model=model, config=ds_config)
         model.train()
         ids = torch.randint(0, vocab, (args.batch, args.seq), dtype=torch.long, device=ds_engine.device)
@@ -541,6 +552,40 @@ def _calibrated_discover_via_subprocess(args, manifest_path):
     _write_manifest(manifest_path, manifest)
 
 
+def prepare_manifests(args):
+    """Discover at the two calibration seqlens once, then write a manifest per --prepare-seqs entry.
+
+    Same extrapolation as _calibrated_discover_via_subprocess, without rerunning both discoveries
+    for every target seqlen.
+    """
+    if not args.discover_calib_seqs:
+        raise ValueError("--prepare-seqs requires --discover-calib-seqs")
+    if not args.manifest_out or "{seq}" not in args.manifest_out:
+        raise ValueError("--prepare-seqs requires --manifest-out containing {seq}")
+    seq_lo, seq_hi = args.discover_calib_seqs
+    if seq_lo == seq_hi:
+        raise ValueError("--discover-calib-seqs requires two distinct seqlens")
+    script = os.path.abspath(__file__)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        path_lo = os.path.join(tmpdir, "calib-lo.json")
+        path_hi = os.path.join(tmpdir, "calib-hi.json")
+        run_arm_subprocess(
+            script, _passthrough(args, path_lo, seq_override=seq_lo) + ["--pin", "0", "--discover-only"])
+        run_arm_subprocess(
+            script, _passthrough(args, path_hi, seq_override=seq_hi) + ["--pin", "0", "--discover-only"])
+        manifest_lo = _read_manifest(path_lo)
+        manifest_hi = _read_manifest(path_hi)
+    if manifest_lo["layers"] != manifest_hi["layers"]:
+        raise RuntimeError(f"calibration manifests disagree on resolved layer count: "
+                           f"{manifest_lo['layers']} vs {manifest_hi['layers']}")
+    for seq in args.prepare_seqs:
+        manifest, _ = extrapolate_manifest(manifest_lo, manifest_hi, seq_lo, seq_hi, seq, args.offload_tensors,
+                                           args.skip_last_layers, manifest_lo["layers"], args.min_offload_bytes)
+        path = args.manifest_out.format(seq=seq)
+        _write_manifest(path, manifest)
+        print(f"[prepare] seq={seq} manifest={path}", flush=True)
+
+
 def run_arm(args):
     if args.mode == "none" and args.pin:
         raise ValueError("--pin has no effect without offload")
@@ -548,6 +593,10 @@ def run_arm(args):
         raise ValueError("--mode remat requires --model; the synthetic stack has no gradient checkpointing")
     if args.offload_optimizer and not args.model:
         raise ValueError("--offload-optimizer requires --model")
+    if args.zero2_gpu and not args.model:
+        raise ValueError("--zero2-gpu requires --model")
+    if args.zero2_gpu and args.offload_optimizer:
+        raise ValueError("--zero2-gpu and --offload-optimizer are mutually exclusive")
     if args.steps < 1 or args.warmup < 0:
         raise ValueError("--steps must be positive and --warmup nonnegative")
     if args.skip_last_layers < 1 or args.skip_last_layers >= args.layers:
@@ -565,9 +614,24 @@ def run_arm(args):
     accelerator = get_accelerator()
     if not accelerator.is_available():
         raise RuntimeError("saved activation offload benchmark requires an accelerator device")
-    accelerator.set_device(0)
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    accelerator.set_device(local_rank)
     device = accelerator.current_device_name()
     device_api = accelerator
+    # Record the placement each rank actually got, so NUMA-binding launches are verifiable.
+    placement = {}
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                key, _, val = line.partition(":")
+                if key in ("Cpus_allowed_list", "Mems_allowed_list"):
+                    placement[key] = val.strip()
+    except OSError:
+        pass
+    print(f"[affinity] local_rank={local_rank} cpus={placement.get('Cpus_allowed_list')} "
+          f"mems={placement.get('Mems_allowed_list')}",
+          file=sys.stderr,
+          flush=True)
 
     # A measured arm never runs Discovery's forward pass itself (see
     # _discover_via_subprocess), and this process must not build its own
@@ -580,6 +644,9 @@ def run_arm(args):
         if not args.manifest_out:
             raise ValueError("a measured arm (no --discover-only) requires --manifest-out")
         if not os.path.exists(args.manifest_out):
+            if int(os.environ.get("WORLD_SIZE", "1")) > 1:
+                raise RuntimeError(f"{args.manifest_out} is missing; prepare it with --prepare-seqs before "
+                                   "launching ranks (a rank must not run discovery)")
             _discover_via_subprocess(args, args.manifest_out)
 
     model, forward_loss, transformers_version, model_type, _, ds_engine = _build_recipe(args, device)
@@ -608,8 +675,12 @@ def run_arm(args):
         return
 
     manifest = _read_manifest(args.manifest_out)
-    selector = load_selector(manifest)
     manifest_hash = hashlib.sha256(manifest_bytes(manifest)).hexdigest()
+    # Signatures carry the device Discovery ran on; each torchrun rank must match tensors on its own
+    # device (shape, stride, dtype and storage offset are the same on every rank).
+    for record in manifest["records"]:
+        record["signature"][3] = device
+    selector = load_selector(manifest)
     selected_records = [record for record in manifest["records"] if record["slot_owner"]]
     selected_bytes = sum(record["nbytes"] for record in selected_records)
     selected_groups = len({record["layer_idx"] for record in selected_records})
@@ -790,7 +861,9 @@ def run_arm(args):
         "hf_model_type": model_type,
         "transformers": transformers_version,
         "params_b": round(sum(param_numel(parameter) for parameter in model.parameters()) / 1e9, 3),
-        "optimizer": "adamw_zero2_cpu" if args.offload_optimizer else "sgd_no_momentum",
+        "optimizer": ("adamw_zero2_cpu" if args.offload_optimizer else
+                      "adamw_zero2_gpu" if args.zero2_gpu else "sgd_no_momentum"),
+        "world_size": int(os.environ.get("WORLD_SIZE", "1")),
         "offload_optimizer": bool(args.offload_optimizer),
         "zero_stage": 2 if args.offload_optimizer else None,
         "layers": args.layers,
@@ -860,7 +933,8 @@ def run_arm(args):
         if expected_host_bytes and abs(result["host_offload_bytes"] -
                                        expected_host_bytes) / expected_host_bytes > 0.05:
             raise RuntimeError("host allocation differs from the selected manifest by more than 5%")
-    print_arm_result(result)
+    if int(os.environ.get("RANK", "0")) == 0:
+        print_arm_result(result)
 
 
 def _passthrough(args, manifest_path, credits=None, seq_override=None):
@@ -1138,6 +1212,8 @@ if __name__ == "__main__":
     parsed = parse_args()
     if parsed.smoke:
         run_smoke()
+    elif parsed.prepare_seqs:
+        prepare_manifests(parsed)
     elif parsed.pin is None:
         run_driver(parsed)
     else:
