@@ -96,6 +96,32 @@ def _allocate_host(accelerator, numel, arm):
     return accelerator.pin_memory(raw, make_copy=False)
 
 
+def _print_placement(local_rank, device):
+    # Record the CPUs, memory nodes, and memory policy each process actually got.
+    status = {}
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                key, _, val = line.partition(":")
+                if key in ("Cpus_allowed_list", "Mems_allowed_list"):
+                    status[key] = val.strip()
+    except OSError:
+        pass
+    policy = "unknown"
+    try:
+        out = subprocess.run(["numactl", "--show"], capture_output=True, text=True, timeout=10).stdout
+        fields = [line.strip() for line in out.splitlines()
+                  if line.startswith(("policy:", "preferred node:", "membind:"))]
+        if fields:
+            policy = "|".join(field.replace(" ", "") for field in fields)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    print(f"[affinity] local_rank={local_rank} device={device} cpus={status.get('Cpus_allowed_list')} "
+          f"mems={status.get('Mems_allowed_list')} policy={policy}",
+          file=sys.stderr,
+          flush=True)
+
+
 def _run_arm(args):
     for key, value in ARMS[args.arm].items():
         os.environ[key] = value
@@ -103,7 +129,10 @@ def _run_arm(args):
     accelerator = get_accelerator()
     if not accelerator.is_available():
         raise RuntimeError(f"No {accelerator.device_name()} device is available")
-    accelerator.set_device(0)
+    # Under a launcher each process copies to its own device; a single process keeps device 0.
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    accelerator.set_device(local_rank)
+    _print_placement(local_rank, accelerator.current_device_name())
     stream = accelerator.Stream()
 
     for size_mib in args.sizes_mib:
@@ -122,6 +151,8 @@ def _run_arm(args):
 
         result = {
             "experiment": "h2d_d2h",
+            "local_rank": local_rank,
+            "device": accelerator.current_device_name(),
             "arm": args.arm,
             "size_mib": size_mib,
             "h2d_gbps": num_bytes / h2d_seconds / 1e9,
